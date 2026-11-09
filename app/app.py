@@ -171,23 +171,8 @@ def new_task():
     return render_template("new_task.html")
 
 
-# Vulnerabilidade #4: endpoint de debug/diagnostico exposto sem
-# autenticacao, vazando informacoes internas do servidor.
-@app.route("/debug/info")
-def debug_info():
-    import platform
-    import sys
-
-    return {
-        "python_version": sys.version,
-        "platform": platform.platform(),
-        "secret_key": app.config["SECRET_KEY"],
-    }
-
-
 if __name__ == "__main__":
     with app.app_context():
         init_db()
-    # Vulnerabilidade #5: debug=True em producao expoe o Werkzeug debugger
-    # interativo (execucao remota de codigo) - tambem sera sinalizado pelo SAST.
-    app.run(host="0.0.0.0", port=5000, debug=True)
+    # O debug fica desligado, a menos que TASKFLOW_DEBUG=1 seja definido.
+    app.run(host="127.0.0.1", port=5000, debug=os.environ.get("TASKFLOW_DEBUG") == "1")
