@@ -19,8 +19,14 @@ usuarios de demonstracao vem de variaveis de ambiente (TASKFLOW_SECRET_KEY,
 TASKFLOW_ADMIN_PASSWORD e TASKFLOW_USER_PASSWORD).
 """
 
+import json
+import logging
 import os
 import sqlite3
+import time
+import uuid
+from datetime import UTC, datetime
+from logging.handlers import RotatingFileHandler
 
 from flask import Flask, g, redirect, render_template, request, session, url_for
 from werkzeug.security import check_password_hash, generate_password_hash
@@ -32,6 +38,62 @@ def exige_variavel(nome):
         raise RuntimeError(f"Variavel de ambiente {nome} nao foi definida.")
     return valor
 
+
+class JsonFormatter(logging.Formatter):
+    """Escreve cada registro de log como uma linha JSON."""
+
+    def format(self, record):
+        entrada = {
+            "timestamp": datetime.fromtimestamp(record.created, tz=UTC).isoformat(),
+            "level": record.levelname,
+            "logger": record.name,
+            "message": record.getMessage(),
+        }
+        # Campos nomeados passados em extra={...} (event, request_id, ip...).
+        padrao = logging.LogRecord("", 0, "", 0, "", None, None).__dict__.keys()
+        for chave, valor in record.__dict__.items():
+            if chave not in padrao and chave not in entrada:
+                entrada[chave] = valor
+        if record.exc_info:
+            entrada["exception"] = self.formatException(record.exc_info)
+        return json.dumps(entrada, ensure_ascii=False)
+
+
+def configurar_logging():
+    """Logger "taskflow": JSON no console e, se possivel, em logs/taskflow.log.
+
+    A pasta vem de TASKFLOW_LOG_DIR (padrao "logs"). Se nao der para gravar
+    em arquivo (por exemplo, com o filesystem somente leitura), o app continua
+    no ar e registra so no console.
+    """
+    logger = logging.getLogger("taskflow")
+    if logger.handlers:
+        return logger
+    logger.setLevel(logging.INFO)
+    logger.propagate = False
+    formatter = JsonFormatter()
+
+    console = logging.StreamHandler()
+    console.setFormatter(formatter)
+    logger.addHandler(console)
+
+    pasta = os.environ.get("TASKFLOW_LOG_DIR", "logs")
+    try:
+        os.makedirs(pasta, exist_ok=True)
+        arquivo = RotatingFileHandler(
+            os.path.join(pasta, "taskflow.log"), maxBytes=5 * 1024 * 1024, backupCount=3
+        )
+        arquivo.setFormatter(formatter)
+        logger.addHandler(arquivo)
+    except OSError as erro:
+        logger.warning(
+            "log em arquivo indisponivel; so console",
+            extra={"event": "log_file_unavailable", "reason": str(erro)},
+        )
+    return logger
+
+
+logger = configurar_logging()
 
 app = Flask(__name__)
 app.config["SECRET_KEY"] = exige_variavel("TASKFLOW_SECRET_KEY")
@@ -97,6 +159,31 @@ with app.app_context():
     init_db()
 
 
+@app.before_request
+def gerar_request_id():
+    # Um identificador por requisicao: todo log emitido nela leva o mesmo id.
+    g.request_id = str(uuid.uuid4())
+    g.inicio = time.time()
+
+
+@app.after_request
+def logar_fim_da_requisicao(response):
+    duracao_ms = round((time.time() - g.get("inicio", time.time())) * 1000, 2)
+    logger.info(
+        "requisicao finalizada",
+        extra={
+            "event": "http_request",
+            "request_id": g.get("request_id"),
+            "method": request.method,
+            "path": request.path,
+            "status_code": response.status_code,
+            "duration_ms": duracao_ms,
+            "username": session.get("username"),
+        },
+    )
+    return response
+
+
 @app.after_request
 def add_security_headers(response):
     response.headers["X-Content-Type-Options"] = "nosniff"
@@ -132,17 +219,46 @@ def login():
         user = cur.fetchone()
 
         # A senha e conferida em Python: recalcula o hash com o mesmo salt e compara.
+        # O log leva so o usuario digitado, o IP e o resultado: nunca a senha.
         if user and check_password_hash(user["password"], password):
             session["user_id"] = user["id"]
             session["username"] = user["username"]
+            logger.info(
+                "login bem-sucedido",
+                extra={
+                    "event": "login_attempt",
+                    "result": "success",
+                    "username": username,
+                    "ip": request.remote_addr,
+                    "request_id": g.get("request_id"),
+                },
+            )
             return redirect(url_for("tasks"))
         error = "Usuario ou senha invalidos."
+        logger.warning(
+            "login falhou",
+            extra={
+                "event": "login_attempt",
+                "result": "failure",
+                "username": username,
+                "ip": request.remote_addr,
+                "request_id": g.get("request_id"),
+            },
+        )
 
     return render_template("login.html", error=error)
 
 
 @app.route("/logout")
 def logout():
+    logger.info(
+        "logout realizado",
+        extra={
+            "event": "logout",
+            "username": session.get("username"),
+            "request_id": g.get("request_id"),
+        },
+    )
     session.clear()
     return redirect(url_for("login"))
 
@@ -167,6 +283,17 @@ def tasks():
             "SELECT * FROM tasks WHERE user_id = ?", (session["user_id"],)
         ).fetchall()
 
+    logger.info(
+        "lista de tarefas acessada",
+        extra={
+            "event": "tasks_list_accessed",
+            "username": session.get("username"),
+            "search_term": search[:100] or None,
+            "results_count": len(rows),
+            "request_id": g.get("request_id"),
+        },
+    )
+
     # Os dados vao para o template; o Jinja2 escapa tudo automaticamente.
     return render_template(
         "tasks.html", tasks=rows, username=session["username"], search=search
@@ -182,11 +309,23 @@ def new_task():
         title = request.form["title"]
         description = request.form["description"]
         db = get_db()
-        db.execute(
+        cur = db.execute(
             "INSERT INTO tasks (user_id, title, description) VALUES (?, ?, ?)",
             (session["user_id"], title, description),
         )
         db.commit()
+        # So metadados: o texto da tarefa pode ter dado sensivel e nao vai para o log.
+        logger.info(
+            "tarefa criada",
+            extra={
+                "event": "task_created",
+                "username": session.get("username"),
+                "task_id": cur.lastrowid,
+                "title_length": len(title),
+                "description_length": len(description or ""),
+                "request_id": g.get("request_id"),
+            },
+        )
         return redirect(url_for("tasks"))
 
     return render_template("new_task.html")
