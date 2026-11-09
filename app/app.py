@@ -23,6 +23,7 @@ import os
 import sqlite3
 
 from flask import Flask, g, redirect, request, session, url_for
+from werkzeug.security import check_password_hash, generate_password_hash
 
 
 def exige_variavel(nome):
@@ -77,15 +78,15 @@ def init_db():
 
     cur = db.execute("SELECT COUNT(*) AS total FROM users")
     if cur.fetchone()["total"] == 0:
-        # Vulnerabilidade #3: senha em texto puro, sem hashing.
-        # As senhas vem do ambiente; nenhuma fica escrita no codigo.
+        # Usuarios de demonstracao: as senhas vem do ambiente e, no banco,
+        # fica so o hash (com salt), nunca a senha.
         db.execute(
             "INSERT INTO users (username, password) VALUES (?, ?)",
-            ("admin", exige_variavel("TASKFLOW_ADMIN_PASSWORD")),
+            ("admin", generate_password_hash(exige_variavel("TASKFLOW_ADMIN_PASSWORD"))),
         )
         db.execute(
             "INSERT INTO users (username, password) VALUES (?, ?)",
-            ("aluno", exige_variavel("TASKFLOW_USER_PASSWORD")),
+            ("aluno", generate_password_hash(exige_variavel("TASKFLOW_USER_PASSWORD"))),
         )
         db.commit()
 
@@ -106,13 +107,11 @@ def login():
 
         # Consulta parametrizada: o banco recebe o SQL e os valores separados.
         db = get_db()
-        cur = db.execute(
-            "SELECT * FROM users WHERE username = ? AND password = ?",
-            (username, password),
-        )
+        cur = db.execute("SELECT * FROM users WHERE username = ?", (username,))
         user = cur.fetchone()
 
-        if user:
+        # A senha e conferida em Python: recalcula o hash com o mesmo salt e compara.
+        if user and check_password_hash(user["password"], password):
             session["user_id"] = user["id"]
             session["username"] = user["username"]
             return redirect(url_for("tasks"))
