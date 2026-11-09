@@ -91,6 +91,27 @@ def init_db():
         db.commit()
 
 
+# Cria as tabelas e os usuarios de demonstracao ao carregar o modulo
+# (assim o gunicorn tambem inicializa o banco).
+with app.app_context():
+    init_db()
+
+
+@app.after_request
+def add_security_headers(response):
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["X-Frame-Options"] = "DENY"
+    response.headers["Content-Security-Policy"] = (
+        "default-src 'self'; frame-ancestors 'none'; form-action 'self'"
+    )
+    response.headers["Permissions-Policy"] = "geolocation=(), camera=(), microphone=()"
+    response.headers["Cross-Origin-Opener-Policy"] = "same-origin"
+    response.headers["Cross-Origin-Embedder-Policy"] = "require-corp"
+    response.headers["Cross-Origin-Resource-Policy"] = "same-origin"
+    response.headers["Cache-Control"] = "no-store"
+    return response
+
+
 @app.route("/")
 def index():
     if "user_id" not in session:
@@ -172,7 +193,6 @@ def new_task():
 
 
 if __name__ == "__main__":
-    with app.app_context():
-        init_db()
+    # Execucao local; no container quem serve a aplicacao e o gunicorn.
     # O debug fica desligado, a menos que TASKFLOW_DEBUG=1 seja definido.
     app.run(host="127.0.0.1", port=5000, debug=os.environ.get("TASKFLOW_DEBUG") == "1")
