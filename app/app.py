@@ -22,7 +22,8 @@ TASKFLOW_ADMIN_PASSWORD e TASKFLOW_USER_PASSWORD).
 import os
 import sqlite3
 
-from flask import Flask, g, redirect, request, session, url_for
+from flask import Flask, g, redirect, render_template, request, session, url_for
+from werkzeug.security import check_password_hash, generate_password_hash
 
 
 def exige_variavel(nome):
@@ -77,15 +78,15 @@ def init_db():
 
     cur = db.execute("SELECT COUNT(*) AS total FROM users")
     if cur.fetchone()["total"] == 0:
-        # Vulnerabilidade #3: senha em texto puro, sem hashing.
-        # As senhas vem do ambiente; nenhuma fica escrita no codigo.
+        # Usuarios de demonstracao: as senhas vem do ambiente e, no banco,
+        # fica so o hash (com salt), nunca a senha.
         db.execute(
             "INSERT INTO users (username, password) VALUES (?, ?)",
-            ("admin", exige_variavel("TASKFLOW_ADMIN_PASSWORD")),
+            ("admin", generate_password_hash(exige_variavel("TASKFLOW_ADMIN_PASSWORD"))),
         )
         db.execute(
             "INSERT INTO users (username, password) VALUES (?, ?)",
-            ("aluno", exige_variavel("TASKFLOW_USER_PASSWORD")),
+            ("aluno", generate_password_hash(exige_variavel("TASKFLOW_USER_PASSWORD"))),
         )
         db.commit()
 
@@ -104,35 +105,19 @@ def login():
         username = request.form["username"]
         password = request.form["password"]
 
-        # Vulnerabilidade #1: SQL Injection.
-        # A query e montada por concatenacao de string em vez de usar
-        # parametros preparados (placeholders "?").
-        query = (
-            "SELECT * FROM users WHERE username = '"
-            + username
-            + "' AND password = '"
-            + password
-            + "'"
-        )
+        # Consulta parametrizada: o banco recebe o SQL e os valores separados.
         db = get_db()
-        cur = db.execute(query)
+        cur = db.execute("SELECT * FROM users WHERE username = ?", (username,))
         user = cur.fetchone()
 
-        if user:
+        # A senha e conferida em Python: recalcula o hash com o mesmo salt e compara.
+        if user and check_password_hash(user["password"], password):
             session["user_id"] = user["id"]
             session["username"] = user["username"]
             return redirect(url_for("tasks"))
         error = "Usuario ou senha invalidos."
 
-    return f"""
-    <h1>TaskFlow - Login</h1>
-    <form method="post">
-        Usuario: <input type="text" name="username"><br>
-        Senha: <input type="password" name="password"><br>
-        <input type="submit" value="Entrar">
-    </form>
-    <p style="color:red">{error or ""}</p>
-    """
+    return render_template("login.html", error=error)
 
 
 @app.route("/logout")
@@ -150,42 +135,21 @@ def tasks():
     db = get_db()
 
     if search:
-        # Vulnerabilidade #1 (variante): SQL Injection tambem na busca.
-        query = (
-            "SELECT * FROM tasks WHERE user_id = "
-            + str(session["user_id"])
-            + " AND title LIKE '%"
-            + search
-            + "%'"
-        )
-        rows = db.execute(query).fetchall()
+        # O padrao do LIKE tambem vai como parametro (um unico "?").
+        like_pattern = f"%{search}%"
+        rows = db.execute(
+            "SELECT * FROM tasks WHERE user_id = ? AND title LIKE ?",
+            (session["user_id"], like_pattern),
+        ).fetchall()
     else:
         rows = db.execute(
             "SELECT * FROM tasks WHERE user_id = ?", (session["user_id"],)
         ).fetchall()
 
-    items = ""
-    for row in rows:
-        # Vulnerabilidade #2: XSS armazenado. A descricao do usuario e
-        # inserida direto no HTML, sem escaping (Jinja2 com | safe
-        # ou f-string manual como aqui tem o mesmo efeito).
-        items += f"""
-        <li>
-            <b>{row['title']}</b> - {row['description']}
-            {'(feita)' if row['done'] else ''}
-        </li>
-        """
-
-    return f"""
-    <h1>Minhas tarefas ({session['username']})</h1>
-    <form method="get">
-        <input type="text" name="q" placeholder="buscar tarefa">
-        <input type="submit" value="Buscar">
-    </form>
-    <ul>{items}</ul>
-    <a href="{url_for('new_task')}">Nova tarefa</a> |
-    <a href="{url_for('logout')}">Sair</a>
-    """
+    # Os dados vao para o template; o Jinja2 escapa tudo automaticamente.
+    return render_template(
+        "tasks.html", tasks=rows, username=session["username"], search=search
+    )
 
 
 @app.route("/tasks/new", methods=["GET", "POST"])
@@ -204,33 +168,11 @@ def new_task():
         db.commit()
         return redirect(url_for("tasks"))
 
-    return """
-    <h1>Nova tarefa</h1>
-    <form method="post">
-        Titulo: <input type="text" name="title"><br>
-        Descricao: <textarea name="description"></textarea><br>
-        <input type="submit" value="Salvar">
-    </form>
-    """
-
-
-# Vulnerabilidade #4: endpoint de debug/diagnostico exposto sem
-# autenticacao, vazando informacoes internas do servidor.
-@app.route("/debug/info")
-def debug_info():
-    import platform
-    import sys
-
-    return {
-        "python_version": sys.version,
-        "platform": platform.platform(),
-        "secret_key": app.config["SECRET_KEY"],
-    }
+    return render_template("new_task.html")
 
 
 if __name__ == "__main__":
     with app.app_context():
         init_db()
-    # Vulnerabilidade #5: debug=True em producao expoe o Werkzeug debugger
-    # interativo (execucao remota de codigo) - tambem sera sinalizado pelo SAST.
-    app.run(host="0.0.0.0", port=5000, debug=True)
+    # O debug fica desligado, a menos que TASKFLOW_DEBUG=1 seja definido.
+    app.run(host="127.0.0.1", port=5000, debug=os.environ.get("TASKFLOW_DEBUG") == "1")
