@@ -91,6 +91,12 @@ def init_db():
         db.commit()
 
 
+# Cria as tabelas e os usuarios de demonstracao ao carregar o modulo
+# (assim o gunicorn tambem inicializa o banco).
+with app.app_context():
+    init_db()
+
+
 @app.route("/")
 def index():
     if "user_id" not in session:
@@ -172,7 +178,6 @@ def new_task():
 
 
 if __name__ == "__main__":
-    with app.app_context():
-        init_db()
+    # Execucao local; no container quem serve a aplicacao e o gunicorn.
     # O debug fica desligado, a menos que TASKFLOW_DEBUG=1 seja definido.
     app.run(host="127.0.0.1", port=5000, debug=os.environ.get("TASKFLOW_DEBUG") == "1")
