@@ -104,18 +104,12 @@ def login():
         username = request.form["username"]
         password = request.form["password"]
 
-        # Vulnerabilidade #1: SQL Injection.
-        # A query e montada por concatenacao de string em vez de usar
-        # parametros preparados (placeholders "?").
-        query = (
-            "SELECT * FROM users WHERE username = '"
-            + username
-            + "' AND password = '"
-            + password
-            + "'"
-        )
+        # Consulta parametrizada: o banco recebe o SQL e os valores separados.
         db = get_db()
-        cur = db.execute(query)
+        cur = db.execute(
+            "SELECT * FROM users WHERE username = ? AND password = ?",
+            (username, password),
+        )
         user = cur.fetchone()
 
         if user:
@@ -150,15 +144,12 @@ def tasks():
     db = get_db()
 
     if search:
-        # Vulnerabilidade #1 (variante): SQL Injection tambem na busca.
-        query = (
-            "SELECT * FROM tasks WHERE user_id = "
-            + str(session["user_id"])
-            + " AND title LIKE '%"
-            + search
-            + "%'"
-        )
-        rows = db.execute(query).fetchall()
+        # O padrao do LIKE tambem vai como parametro (um unico "?").
+        like_pattern = f"%{search}%"
+        rows = db.execute(
+            "SELECT * FROM tasks WHERE user_id = ? AND title LIKE ?",
+            (session["user_id"], like_pattern),
+        ).fetchall()
     else:
         rows = db.execute(
             "SELECT * FROM tasks WHERE user_id = ?", (session["user_id"],)
