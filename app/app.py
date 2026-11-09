@@ -36,7 +36,7 @@ def exige_variavel(nome):
 app = Flask(__name__)
 app.config["SECRET_KEY"] = exige_variavel("TASKFLOW_SECRET_KEY")
 
-DATABASE = "taskflow.db"
+DATABASE = os.environ.get("TASKFLOW_DB", "taskflow.db")
 
 
 def get_db():
